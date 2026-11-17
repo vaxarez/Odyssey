@@ -6,3 +6,7 @@ edition = "2024"
 [dependencies]
 evtx = "0.15.1"
 serde_json = "1"
+
+[[test]]
+name = "e2e"
+path = "e2e/cli.rs"

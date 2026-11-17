@@ -55,7 +55,7 @@ Only one positional argument is accepted. Any additional positional argument, un
 ### Example
 
 ```sh
-cargo run -- tests/auth.log --top 3
+cargo run -- auth.log --top 3
 ```
 
 ## Input format
@@ -80,7 +80,7 @@ YYYY-MM-DDTHH:MM:SS LEVEL component: message
 
 Trailing whitespace is trimmed. Empty lines are ignored and are not counted. Lines that do not match the format are counted as malformed and skipped.
 
-A sample file conforming to this format is provided at `tests/auth.log`.
+The end-to-end tests in `e2e/cli.rs` show a complete example of this format.
 
 ### Windows Event Log input
 
@@ -171,14 +171,9 @@ cargo test
 The suite has two layers:
 
 - **Unit tests** (`src/main.rs`, 21 tests; `src/evtx_input.rs`, 9 tests) cover line parsing, including malformed timestamps and separators, IPv4 extraction and range checks, login classification, time-range computation, level and component counting, invalid UTF-8 handling, and result ordering.
-- **Integration tests** (`tests/cli.rs`, 10 tests) run the compiled binary against the fixtures in `tests/` and check stdout, stderr and exit codes. They cover the full report on `tests/auth.log`, the `--top` option, omission of the IP section when there are no failures, missing files, every usage-error path, and a file with the `.evtx` signature but corrupt contents.
+- **End-to-end tests** (`e2e/cli.rs`, 10 tests) run the compiled binary on log files that each test writes to a temporary directory, then check stdout, stderr and exit codes. They cover the full report, the `--top` option, omission of the IP section when there are no failures, missing files, every usage-error path, and a file with the `.evtx` signature but corrupt contents. Run them with `cargo test --test e2e`.
 
-The `.evtx` mapping is tested with synthetic rendered records, because no sample `.evtx` file is committed. Real Windows logs have been verified only where the analyzer could read them.
-
-Fixtures:
-
-- `tests/auth.log` — mixed-level sample with failures, successes and one malformed line.
-- `tests/success_only.log` — successful logins only.
+The `.evtx` mapping is tested with synthetic rendered records, because no sample `.evtx` file is committed. Real Windows logs were checked manually on a local machine and are not part of the repository.
 
 ## Repository layout
 
@@ -188,10 +183,8 @@ Fixtures:
 ├── src/
 │   ├── main.rs       Entry model, text parser, report, CLI, unit tests
 │   └── evtx_input.rs Windows Event Log reader and mapping, unit tests
-├── tests/
-│   ├── cli.rs        Integration tests (run the compiled binary)
-│   ├── auth.log      Mixed sample input
-│   └── success_only.log  Sample input with no failed logins
+├── e2e/
+│   └── cli.rs        End-to-end tests (run the compiled binary)
 └── README.md
 ```
 
