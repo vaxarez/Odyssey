@@ -25,16 +25,85 @@ struct Report {
     last_ts: Option<String>,
 }
 
-#[derive(Debug, PartialEq)]
-struct Entry<'a> {
-    timestamp: &'a str,
-    level: &'a str,
-    component: &'a str,
-    message: &'a str,
+/// Classification of a login-related record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LoginOutcome {
+    Failed,
+    Succeeded,
+}
+
+/// A single normalized log record, independent of the source format.
+///
+/// Parsers are responsible for filling in `login` and `source_ip`; the
+/// report only counts entries and never inspects format-specific text.
+#[derive(Debug)]
+struct Entry {
+    timestamp: String,
+    level: String,
+    component: String,
+    /// `Some` when the record is a login attempt.
+    login: Option<LoginOutcome>,
+    /// Source address of a failed login, when one could be extracted.
+    source_ip: Option<String>,
+}
+
+impl Report {
+    /// Count a line that could not be parsed.
+    fn record_malformed(&mut self) {
+        self.total_lines += 1;
+        self.malformed_lines += 1;
+    }
+
+    /// Count a successfully parsed entry.
+    fn record(&mut self, entry: &Entry) {
+        self.total_lines += 1;
+        self.parsed_lines += 1;
+
+        *self.levels.entry(entry.level.clone()).or_insert(0) += 1;
+        *self.components.entry(entry.component.clone()).or_insert(0) += 1;
+
+        if self
+            .first_ts
+            .as_deref()
+            .is_none_or(|t| entry.timestamp.as_str() < t)
+        {
+            self.first_ts = Some(entry.timestamp.clone());
+        }
+        if self
+            .last_ts
+            .as_deref()
+            .is_none_or(|t| entry.timestamp.as_str() > t)
+        {
+            self.last_ts = Some(entry.timestamp.clone());
+        }
+
+        match entry.login {
+            Some(LoginOutcome::Failed) => {
+                self.failed_logins += 1;
+                if let Some(ip) = &entry.source_ip {
+                    *self.failed_by_ip.entry(ip.clone()).or_insert(0) += 1;
+                }
+            }
+            Some(LoginOutcome::Succeeded) => self.successful_logins += 1,
+            None => {}
+        }
+    }
+}
+
+/// Classify a plain-text message by its wording.
+fn classify_text_login(message: &str) -> Option<LoginOutcome> {
+    let msg = message.to_ascii_lowercase();
+    if msg.contains("failed password") || msg.contains("login failed") {
+        Some(LoginOutcome::Failed)
+    } else if msg.contains("accepted password") || msg.contains("login succeeded") {
+        Some(LoginOutcome::Succeeded)
+    } else {
+        None
+    }
 }
 
 /// Parse `YYYY-MM-DDTHH:MM:SS LEVEL component: message`.
-fn parse_line(line: &str) -> Option<Entry<'_>> {
+fn parse_line(line: &str) -> Option<Entry> {
     let (timestamp, rest) = line.split_once(' ')?;
     if timestamp.len() != 19 || !timestamp.contains('T') {
         return None;
@@ -44,11 +113,19 @@ fn parse_line(line: &str) -> Option<Entry<'_>> {
     if level.is_empty() || component.is_empty() {
         return None;
     }
+
+    let login = classify_text_login(message);
+    let source_ip = match login {
+        Some(LoginOutcome::Failed) => extract_ip(message).map(str::to_string),
+        _ => None,
+    };
+
     Some(Entry {
-        timestamp,
-        level,
-        component,
-        message,
+        timestamp: timestamp.to_string(),
+        level: level.to_string(),
+        component: component.to_string(),
+        login,
+        source_ip,
     })
 }
 
@@ -72,35 +149,9 @@ fn analyze<R: BufRead>(reader: R) -> io::Result<Report> {
         if line.is_empty() {
             continue;
         }
-        report.total_lines += 1;
-
-        let Some(entry) = parse_line(line) else {
-            report.malformed_lines += 1;
-            continue;
-        };
-        report.parsed_lines += 1;
-
-        *report.levels.entry(entry.level.to_string()).or_insert(0) += 1;
-        *report
-            .components
-            .entry(entry.component.to_string())
-            .or_insert(0) += 1;
-
-        if report.first_ts.as_deref().is_none_or(|t| entry.timestamp < t) {
-            report.first_ts = Some(entry.timestamp.to_string());
-        }
-        if report.last_ts.as_deref().is_none_or(|t| entry.timestamp > t) {
-            report.last_ts = Some(entry.timestamp.to_string());
-        }
-
-        let msg = entry.message.to_ascii_lowercase();
-        if msg.contains("failed password") || msg.contains("login failed") {
-            report.failed_logins += 1;
-            if let Some(ip) = extract_ip(entry.message) {
-                *report.failed_by_ip.entry(ip.to_string()).or_insert(0) += 1;
-            }
-        } else if msg.contains("accepted password") || msg.contains("login succeeded") {
-            report.successful_logins += 1;
+        match parse_line(line) {
+            Some(entry) => report.record(&entry),
+            None => report.record_malformed(),
         }
     }
 
@@ -201,7 +252,8 @@ mod tests {
         assert_eq!(e.timestamp, "2026-11-17T10:00:01");
         assert_eq!(e.level, "WARN");
         assert_eq!(e.component, "sshd");
-        assert_eq!(e.message, "Failed password for bob from 1.2.3.4");
+        assert_eq!(e.login, Some(LoginOutcome::Failed));
+        assert_eq!(e.source_ip.as_deref(), Some("1.2.3.4"));
     }
 
     #[test]
@@ -257,10 +309,12 @@ bad line
     }
 
     #[test]
-    fn message_keeps_later_colons() {
-        let e = parse_line("2026-11-17T10:00:00 INFO app: a: b").unwrap();
+    fn component_ends_at_first_separator() {
+        let e = parse_line("2026-11-17T10:00:00 INFO app: Failed password for a: b from 1.2.3.4")
+            .unwrap();
         assert_eq!(e.component, "app");
-        assert_eq!(e.message, "a: b");
+        assert_eq!(e.login, Some(LoginOutcome::Failed));
+        assert_eq!(e.source_ip.as_deref(), Some("1.2.3.4"));
     }
 
     #[test]
