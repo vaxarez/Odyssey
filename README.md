@@ -22,7 +22,7 @@ Odyssey is a dependency-free command-line log analyzer written in Rust. It reads
 - Rust toolchain supporting **edition 2024** (Rust 1.85 or later).
 - Cargo.
 
-No external crates are required for the analyzer itself.
+Cargo fetches the two dependencies listed under [Dependencies](#dependencies) automatically.
 
 ## Build
 
@@ -60,6 +60,13 @@ cargo run -- tests/auth.log --top 3
 
 ## Input format
 
+Odyssey accepts two kinds of input and detects which one from the file's contents, not its extension:
+
+- **Windows Event Log (`.evtx`)** files, recognized by the `ElfFile\0` file signature. Each record is rendered by the `evtx` crate and mapped to the same internal form as text lines. See [Windows Event Log input](#windows-event-log-input).
+- **Plain-text logs** in the form below.
+
+### Plain-text logs
+
 Each line is expected to have the form:
 
 ```
@@ -74,6 +81,23 @@ YYYY-MM-DDTHH:MM:SS LEVEL component: message
 Trailing whitespace is trimmed. Empty lines are ignored and are not counted. Lines that do not match the format are counted as malformed and skipped.
 
 A sample file conforming to this format is provided at `tests/auth.log`.
+
+### Windows Event Log input
+
+For `.evtx` files, each record is mapped as follows:
+
+| Report field     | Source in the event                                                       |
+|------------------|---------------------------------------------------------------------------|
+| Timestamp        | `System/TimeCreated/@SystemTime`, truncated to `YYYY-MM-DDTHH:MM:SS` (UTC) |
+| Level            | `System/Level`: 1 CRITICAL, 2 ERROR, 3 WARN, 4 and 0 INFO, 5 VERBOSE, other UNKNOWN |
+| Component        | `System/Provider/@Name` (`unknown` if absent)                             |
+| Failed login     | Event ID 4625 from provider `Microsoft-Windows-Security-Auditing`         |
+| Successful login | Event ID 4624 from provider `Microsoft-Windows-Security-Auditing`         |
+| Source IP        | `EventData/IpAddress` of a failed login, when it is a valid IPv4 address  |
+
+Login classification uses event IDs from the Security provider only. Other providers never count as logins, even if their messages contain login wording. Records that cannot be read or mapped are counted as malformed.
+
+Reading the Security log normally requires administrator rights. Access-denied errors are reported as `cannot open` (exit code `1`).
 
 ## Output
 
@@ -146,8 +170,10 @@ cargo test
 
 The suite has two layers:
 
-- **Unit tests** (`src/main.rs`, 21 tests) cover line parsing, including malformed timestamps and separators, IPv4 extraction and range checks, login classification, time-range computation, level and component counting, invalid UTF-8 handling, and result ordering.
-- **Integration tests** (`tests/cli.rs`, 9 tests) run the compiled binary against the fixtures in `tests/` and check stdout, stderr and exit codes. They cover the full report on `tests/auth.log`, the `--top` option, omission of the IP section when there are no failures, missing files, and every usage-error path.
+- **Unit tests** (`src/main.rs`, 21 tests; `src/evtx_input.rs`, 9 tests) cover line parsing, including malformed timestamps and separators, IPv4 extraction and range checks, login classification, time-range computation, level and component counting, invalid UTF-8 handling, and result ordering.
+- **Integration tests** (`tests/cli.rs`, 10 tests) run the compiled binary against the fixtures in `tests/` and check stdout, stderr and exit codes. They cover the full report on `tests/auth.log`, the `--top` option, omission of the IP section when there are no failures, missing files, every usage-error path, and a file with the `.evtx` signature but corrupt contents.
+
+The `.evtx` mapping is tested with synthetic rendered records, because no sample `.evtx` file is committed. Real Windows logs have been verified only where the analyzer could read them.
 
 Fixtures:
 
@@ -160,7 +186,8 @@ Fixtures:
 .
 ├── Cargo.toml        Package manifest
 ├── src/
-│   └── main.rs       Parser, aggregator, report printer, CLI, unit tests
+│   ├── main.rs       Entry model, text parser, report, CLI, unit tests
+│   └── evtx_input.rs Windows Event Log reader and mapping, unit tests
 ├── tests/
 │   ├── cli.rs        Integration tests (run the compiled binary)
 │   ├── auth.log      Mixed sample input
@@ -177,12 +204,17 @@ Fixtures:
 - The entire file is read in a single pass with streaming line reads; no output is produced until the end of the input.
 - Only IPv4 source addresses are extracted. IPv6 addresses are not recognized.
 - Login detection relies on substring matches against fixed phrases.
-- Windows Event Log (`.evtx`) files are not supported.
-- Input must be valid UTF-8; otherwise reading fails with exit code `1`.
+- Login classification for `.evtx` covers only Security events 4624 and 4625. Other authentication events are not counted.
+- Input text must be valid UTF-8; otherwise reading fails with exit code `1`.
 
 ## Dependencies
 
-Odyssey has no external dependencies. It uses only the Rust standard library.
+Odyssey has two dependencies:
+
+- `evtx` (0.15.1) — parses Windows Event Log files.
+- `serde_json` (1) — reads the JSON rendered for each `.evtx` record.
+
+Plain-text analysis uses only the standard library.
 
 ## License
 

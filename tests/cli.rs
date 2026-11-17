@@ -101,3 +101,20 @@ fn help_prints_usage_and_exits_with_2() {
     assert_eq!(out.status.code(), Some(2));
     assert!(stderr(&out).contains("Usage"), "{}", stderr(&out));
 }
+
+#[test]
+fn corrupt_evtx_signature_exits_with_1() {
+    // A file with the .evtx signature but no valid chunks must fail cleanly.
+    let dir = std::env::temp_dir().join(format!("odyssey-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("corrupt.evtx");
+    let mut bytes = b"ElfFile\0".to_vec();
+    bytes.extend_from_slice(&[0u8; 64]);
+    std::fs::write(&path, &bytes).unwrap();
+
+    let out = run(&[path.to_str().unwrap()]);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(stderr(&out).contains("as evtx"), "{}", stderr(&out));
+}

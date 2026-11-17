@@ -2,13 +2,18 @@
 //!
 //! Usage: odyssey <logfile> [--top N]
 //!
-//! Expects lines in the form: `YYYY-MM-DDTHH:MM:SS LEVEL component: message`.
-//! Malformed lines are counted and skipped.
+//! Accepts two input formats, detected from the file contents:
+//! - Windows Event Log (`.evtx`) files, handled by `evtx_input`.
+//! - Text lines in the form `YYYY-MM-DDTHH:MM:SS LEVEL component: message`.
+//!   Malformed lines are counted and skipped.
+
+mod evtx_input;
 
 use std::collections::HashMap;
 use std::env;
 use std::fs::File;
-use std::io::{self, BufRead, BufReader};
+use std::io::{self, BufRead, BufReader, Read, Seek};
+use std::path::Path;
 use std::process;
 
 #[derive(Default, Debug)]
@@ -129,15 +134,16 @@ fn parse_line(line: &str) -> Option<Entry> {
     })
 }
 
+/// True if `s` is a dotted-quad IPv4 address.
+fn is_ipv4(s: &str) -> bool {
+    s.split('.').count() == 4 && s.split('.').all(|p| p.parse::<u8>().is_ok())
+}
+
 /// Extract the IPv4 address that follows "from " in a login message.
 fn extract_ip(message: &str) -> Option<&str> {
     let idx = message.find(" from ")?;
     let ip = message[idx + 6..].split_whitespace().next()?;
-    if ip.split('.').count() == 4 && ip.split('.').all(|p| p.parse::<u8>().is_ok()) {
-        Some(ip)
-    } else {
-        None
-    }
+    if is_ipv4(ip) { Some(ip) } else { None }
 }
 
 fn analyze<R: BufRead>(reader: R) -> io::Result<Report> {
@@ -224,21 +230,35 @@ fn main() {
 
     let Some(path) = path else { usage() };
 
-    let file = match File::open(&path) {
+    let mut file = match File::open(&path) {
         Ok(f) => f,
-        Err(e) => {
-            eprintln!("error: cannot open '{path}': {e}");
-            process::exit(1);
-        }
+        Err(e) => fail(&format!("cannot open '{path}': {e}")),
     };
 
-    match analyze(BufReader::new(file)) {
-        Ok(report) => print_report(&report, top),
-        Err(e) => {
-            eprintln!("error: failed reading '{path}': {e}");
-            process::exit(1);
-        }
+    // Detect the format from the file signature, not the extension.
+    let mut magic = [0u8; 8];
+    let is_evtx = file.read_exact(&mut magic).is_ok() && &magic == evtx_input::MAGIC;
+    if let Err(e) = file.rewind() {
+        fail(&format!("cannot read '{path}': {e}"));
     }
+
+    let result = if is_evtx {
+        let mut report = Report::default();
+        evtx_input::analyze_file(Path::new(&path), &mut report).map(|()| report)
+    } else {
+        analyze(BufReader::new(file)).map_err(|e| format!("failed reading '{path}': {e}"))
+    };
+
+    match result {
+        Ok(report) => print_report(&report, top),
+        Err(msg) => fail(&msg),
+    }
+}
+
+/// Print an error to stderr and exit with status 1.
+fn fail(msg: &str) -> ! {
+    eprintln!("error: {msg}");
+    process::exit(1);
 }
 
 #[cfg(test)]
